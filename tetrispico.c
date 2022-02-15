@@ -29,12 +29,27 @@
 #include "tetris.h"
 
 // 入力ボタンのビット定義
+#ifdef PIMORONI_PICOSYSTEM
+#define GPIO_KEYUP 23
+#define GPIO_KEYLEFT 22
+#define GPIO_KEYRIGHT 21
+#define GPIO_KEYDOWN 20
+#define GPIO_KEYSTART 18
+#define GPIO_KEYFIRE 19
+#define GPIO_KEYMUTE 17
+
+#define SOUNDPORT 11
+#else
 #define GPIO_KEYUP 0
 #define GPIO_KEYLEFT 1
 #define GPIO_KEYRIGHT 2
 #define GPIO_KEYDOWN 3
 #define GPIO_KEYSTART 4
 #define GPIO_KEYFIRE 5
+
+#define SOUNDPORT 6
+#endif
+
 #define KEYUP (1<<GPIO_KEYUP)
 #define KEYLEFT (1<<GPIO_KEYLEFT)
 #define KEYRIGHT (1<<GPIO_KEYRIGHT)
@@ -43,7 +58,6 @@
 #define KEYFIRE (1<<GPIO_KEYFIRE)
 #define KEYSMASK (KEYUP|KEYLEFT|KEYRIGHT|KEYDOWN|KEYSTART|KEYFIRE)
 
-#define SOUNDPORT 6
 
 #define clearscreen() LCD_Clear(0)
 
@@ -200,7 +214,15 @@ const unsigned char bitmap1[]={
 #define PWM_WRAP 4000 // 125MHz/31.25KHz
 uint pwm_slice_num;
 
+bool sound_enabled = true;
+#ifdef PIMORONI_PICOSYSTEM
+uint64_t last_key_time = 0;
+#endif
+
 void sound_on(uint16_t f){
+  if(!sound_enabled)
+  return;
+
 	pwm_set_clkdiv_int_frac(pwm_slice_num, f>>4, f&15);
 	pwm_set_enabled(pwm_slice_num, true);
 }
@@ -209,6 +231,15 @@ void sound_off(void){
 }
 
 void wait60thsec(unsigned short n){
+#ifdef LCD_VSYNC
+	if(n == 1) {
+		// sync to 60Hz refresh rate
+		while(gpio_get(LCD_VSYNC));
+		while(!gpio_get(LCD_VSYNC));
+		return;
+	}
+#endif
+
 	// 60分のn秒ウェイト
 	uint64_t t=to_us_since_boot(get_absolute_time())%16667;
 	sleep_us(16667*n-t);
@@ -426,10 +457,22 @@ void displaylevel(void){
 }
 
 void moveblock(void){
+#ifdef GPIO_KEYMUTE
+	static bool last_mute_val = true;
+	bool mute_val = gpio_get(GPIO_KEYMUTE);
+
+	if(!mute_val && last_mute_val) {
+		sound_enabled = !sound_enabled;
+		if(!sound_enabled)
+			pwm_set_enabled(pwm_slice_num, false);
+	}
+	last_mute_val = mute_val;
+#endif
+
 //ブロックの落下、キー入力チェックで回転、移動
 //落下できない場合はgamestatus=1とする
 
-	unsigned short k;
+	unsigned int k;
 	_Block tempblock;
 	const _Block *blockp;
 	int8_t movedflag;
@@ -438,6 +481,19 @@ void moveblock(void){
 
 	// ボタンチェック
 	k=~gpio_get_all() & KEYSMASK;
+
+#ifdef PIMORONI_PICOSYSTEM
+//キーデバウンス
+   	uint64_t t=to_us_since_boot(get_absolute_time())%16667;
+     if (t - last_key_time > 1000){
+       last_key_time = t;
+     }
+     else{
+      k=1;
+    }
+#endif
+
+
 	if(keyold!=KEYUP && k==KEYUP){	//上ボタン（回転）
 		if(blockangle<falling.rot){ //軸中心に90度回転
 			tempblock.x1=-falling.y1;
@@ -824,14 +880,14 @@ int main(void){
 	pwm_slice_num = pwm_gpio_to_slice_num(SOUNDPORT);
 	pwm_set_wrap(pwm_slice_num, PWM_WRAP-1);
 	// duty 50%
-	pwm_set_chan_level(pwm_slice_num, PWM_CHAN_A, PWM_WRAP/2);
+		pwm_set_gpio_level(SOUNDPORT, PWM_WRAP/2);
+
 
 	// 液晶用ポート設定
-    // Enable SPI 0 at 40 MHz and connect to GPIOs
-    spi_init(SPICH, 40000 * 1000);
-    gpio_set_function(PICO_DEFAULT_SPI_RX_PIN, GPIO_FUNC_SPI);
-    gpio_set_function(PICO_DEFAULT_SPI_SCK_PIN, GPIO_FUNC_SPI);
-    gpio_set_function(PICO_DEFAULT_SPI_TX_PIN, GPIO_FUNC_SPI);
+    // Enable SPI 0 and connect to GPIOs
+    spi_init(SPICH, LCD_SPI_FREQ);
+    gpio_set_function(LCD_SCK, GPIO_FUNC_SPI);
+    gpio_set_function(LCD_TX, GPIO_FUNC_SPI);
 
 	gpio_init(LCD_CS);
 	gpio_put(LCD_CS, 1);
@@ -843,9 +899,23 @@ int main(void){
 	gpio_put(LCD_RESET, 1);
 	gpio_set_dir(LCD_RESET, GPIO_OUT);
 
+#ifdef LCD_BACKLIGHT
+	gpio_init(LCD_BACKLIGHT);
+	gpio_set_dir(LCD_BACKLIGHT, GPIO_OUT);
+	gpio_put(LCD_BACKLIGHT, 1);
+#endif
+
+#ifdef LCD_VSYNC
+	gpio_init(LCD_VSYNC);
+	gpio_set_dir(LCD_VSYNC, GPIO_IN);
+#endif
+
 	init_graphic(); //液晶利用開始
+
+#ifndef PIMORONI_PICOSYSTEM
 	LCD_WriteComm(0x37); //画面中央にするためスクロール設定
 	LCD_WriteData2(272);
+#endif
 
 	gameinit(); //ゲーム全体初期化
 	while(1){

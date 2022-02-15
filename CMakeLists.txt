@@ -25,3 +25,5 @@ target_link_libraries(tetrispico pico_stdlib hardware_spi hardware_pwm)
 
 # create map/bin/hex file etc.
 pico_add_extra_outputs(tetrispico)
+
+pico_set_program_name(tetrispico "Tetris for Raspberry Pi Pico")
